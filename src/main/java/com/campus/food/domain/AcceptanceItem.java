@@ -71,4 +71,12 @@ public class AcceptanceItem {
     /** 降级折价率（0.2 表示按 8 折结算） */
     @Column(precision = 5, scale = 4)
     private BigDecimal discountRate;
+
+    /** 冷链温度超标暂扣数量（待食堂处置：拒收/降级/复检，处置前不计入库存与结算） */
+    @Column(nullable = false, precision = 14, scale = 3)
+    private BigDecimal heldQty = BigDecimal.ZERO;
+
+    /** 本明细是否涉及冷链温度超标（对应冷链处置案件） */
+    @Column(nullable = false)
+    private boolean coldChainBreach = false;
 }

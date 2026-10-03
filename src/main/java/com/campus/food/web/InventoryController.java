@@ -1,8 +1,11 @@
 package com.campus.food.web;
 
 import com.campus.food.domain.InventoryTxn;
+import com.campus.food.domain.RestrictedStockBatch;
 import com.campus.food.domain.StockLevel;
+import com.campus.food.domain.enums.ConsumePurpose;
 import com.campus.food.domain.enums.InventoryTxnType;
+import com.campus.food.repo.RestrictedStockBatchRepo;
 import com.campus.food.service.InventoryService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -22,9 +25,14 @@ import java.util.List;
 public class InventoryController {
 
     private final InventoryService inventoryService;
+    private final RestrictedStockBatchRepo restrictedBatchRepo;
 
     public record AdjustReq(@NotNull Long ingredientId, @NotNull BigDecimal qty,
                             @NotNull InventoryTxnType type, String remark) {
+    }
+
+    public record ConsumeReq(@NotNull Long ingredientId, @NotNull BigDecimal qty,
+                             @NotNull ConsumePurpose purpose, String remark) {
     }
 
     @Operation(summary = "库存水位列表")
@@ -56,5 +64,19 @@ public class InventoryController {
         }
         return inventoryService.change(req.ingredientId(), req.qty(), req.type(),
                 "MANUAL", null, req.remark());
+    }
+
+    @Operation(summary = "按用途领用（学生餐禁止使用冷链降级受限批次；教职工餐/非即食加工优先消耗匹配的降级批次）")
+    @PostMapping("/consume")
+    @PreAuthorize("hasRole('CANTEEN')")
+    public StockLevel consume(@Valid @RequestBody ConsumeReq req) {
+        return inventoryService.consumeFor(req.ingredientId(), req.qty(), req.purpose(), req.remark());
+    }
+
+    @Operation(summary = "冷链降级受限库存批次（限教职工餐/非即食加工使用）")
+    @GetMapping("/restricted-batches")
+    public List<RestrictedStockBatch> restrictedBatches(@RequestParam(required = false) Long ingredientId) {
+        return ingredientId != null ? restrictedBatchRepo.findByIngredientId(ingredientId)
+                : restrictedBatchRepo.findAll();
     }
 }

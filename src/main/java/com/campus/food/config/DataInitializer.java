@@ -46,6 +46,7 @@ public class DataInitializer implements CommandLineRunner {
         user("inspector", "inspector123", "王验收", Role.INSPECTOR);
         user("buyer", "buyer123", "李采购", Role.PROCUREMENT);
         user("canteen", "canteen123", "赵食堂", Role.CANTEEN);
+        user("quality", "quality123", "孙质检", Role.QUALITY);
         user("admin", "admin123", "陈校长", Role.SCHOOL_ADMIN);
 
         // 供应商
@@ -55,6 +56,8 @@ public class DataInitializer implements CommandLineRunner {
                 "MEAT", true, "HT-2026-002");
         Supplier dairy = supplier("SUP003", "康源乳业配送中心", "孙经理", "13800000003",
                 "DAIRY", true, "HT-2026-003");
+        Supplier dairyBackup = supplier("SUP005", "晨光乳品应急配送站", "钱经理", "13800000005",
+                "DAIRY", true, "HT-2026-005");
         Supplier grain = supplier("SUP004", "丰收粮油调味批发部", "周经理", "13800000004",
                 "GRAIN_OIL,CONDIMENT", false, "HT-2026-004");
 
@@ -129,7 +132,7 @@ public class DataInitializer implements CommandLineRunner {
         MenuMeal m6 = meal(menu, monday.plusDays(4), MealType.LUNCH, "苹果加餐", 500);
         mmi(m6, apple, "60");
 
-        log.info("演示数据初始化完成：4 供应商 / 12 食材 / 本周菜单 {} 起", monday);
+        log.info("演示数据初始化完成：5 供应商 / 12 食材 / 本周菜单 {} 起", monday);
     }
 
     private void user(String username, String rawPassword, String fullName, Role role) {

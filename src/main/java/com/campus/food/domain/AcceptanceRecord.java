@@ -49,6 +49,13 @@ public class AcceptanceRecord {
     @Column(length = 512)
     private String samplingResult;
 
+    /** 运输时长（分钟，冷链取证用） */
+    private Integer transportDurationMinutes;
+
+    /** 抽检照片 URL（逗号分隔多张，冷链取证用） */
+    @Column(length = 1024)
+    private String photosUrl;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 24)
     private AcceptanceOverallResult overallResult;

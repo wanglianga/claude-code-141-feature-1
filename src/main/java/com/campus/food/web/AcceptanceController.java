@@ -27,28 +27,31 @@ public class AcceptanceController {
     public record AcceptanceItemReq(@NotNull Long deliveryItemId,
                                     BigDecimal acceptedQty, BigDecimal rejectedQty,
                                     BigDecimal downgradedQty, BigDecimal rotRatio,
-                                    String rejectReason) {
+                                    String rejectReason, Boolean coldChainHeld) {
     }
 
     public record CreateAcceptanceReq(@NotNull Long batchId, BigDecimal measuredTemp,
                                       Boolean temperatureOk, Boolean appearanceOk,
                                       String samplingResult, String notes,
+                                      Integer transportDurationMinutes, String photosUrl,
                                       @NotEmpty List<AcceptanceItemReq> items) {
     }
 
     public record DowngradeApprovalReq(@NotNull Boolean approve, BigDecimal discountRate) {
     }
 
-    @Operation(summary = "创建验收记录（合格入库/拒收退货/降级待审批；自动识别少送、腐烂超标、票证缺失、已备餐无法拒收）")
+    @Operation(summary = "创建验收记录（合格入库/拒收退货/降级待审批；自动识别少送、腐烂超标、票证缺失、已备餐无法拒收；"
+            + "冷链温度超标可传 coldChainHeld=true 整批暂扣待食堂处置，并录入到货温度、运输时长、产品批次、抽检照片）")
     @PostMapping
     @PreAuthorize("hasRole('INSPECTOR')")
     public AcceptanceRecord create(Authentication auth, @Valid @RequestBody CreateAcceptanceReq req) {
         List<AcceptanceService.AcceptanceItemInput> items = req.items().stream()
                 .map(i -> new AcceptanceService.AcceptanceItemInput(i.deliveryItemId(), i.acceptedQty(),
-                        i.rejectedQty(), i.downgradedQty(), i.rotRatio(), i.rejectReason()))
+                        i.rejectedQty(), i.downgradedQty(), i.rotRatio(), i.rejectReason(), i.coldChainHeld()))
                 .toList();
         return acceptanceService.create(auth.getName(), req.batchId(), req.measuredTemp(),
-                req.temperatureOk(), req.appearanceOk(), req.samplingResult(), req.notes(), items);
+                req.temperatureOk(), req.appearanceOk(), req.samplingResult(), req.notes(),
+                req.transportDurationMinutes(), req.photosUrl(), items);
     }
 
     @Operation(summary = "验收记录详情（含明细）")
@@ -57,7 +60,7 @@ public class AcceptanceController {
         return acceptanceService.detail(id);
     }
 
-    @Operation(summary = "降级使用审批（批准则折价入库，驳回则转退货）")
+    @Operation(summary = "普通降级使用审批（批准则折价入库，驳回则转退货）")
     @PostMapping("/items/{itemId}/downgrade-approval")
     @PreAuthorize("hasRole('PROCUREMENT')")
     public AcceptanceItem approveDowngrade(@PathVariable Long itemId,
