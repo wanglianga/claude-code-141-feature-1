@@ -28,7 +28,8 @@ public class ReturnOrder {
     @JoinColumn(name = "supplier_id")
     private Supplier supplier;
 
-    @ManyToOne(optional = false, fetch = FetchType.EAGER)
+    /** 关联验收明细（冷链超标在验收环节直接拒收时可为空） */
+    @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "acceptance_item_id")
     private AcceptanceItem acceptanceItem;
 

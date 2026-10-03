@@ -23,6 +23,9 @@ class PenaltyRulesTest {
     void coldChainHasMinimumPenalty() {
         assertEquals(new BigDecimal("300.00"),
                 PenaltyRules.penaltyFor(AnomalyType.COLD_CHAIN_BREACH, new BigDecimal("100")));
+        // 冷链货值 10000 * 5% = 500，超过最低 300 时按比例计罚（与拒收索赔共同进入结算）
+        assertEquals(new BigDecimal("500.00"),
+                PenaltyRules.penaltyFor(AnomalyType.COLD_CHAIN_BREACH, new BigDecimal("10000")));
     }
 
     @Test

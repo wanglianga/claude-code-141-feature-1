@@ -28,6 +28,7 @@ public class AcceptanceService {
     private final AppUserRepo userRepo;
     private final MenuMealIngredientRepo mealIngredientRepo;
     private final PurchaseOrderRepo orderRepo;
+    private final ColdChainCaseRepo coldChainCaseRepo;
     private final InventoryService inventoryService;
     private final AnomalyService anomalyService;
     private final ReturnService returnService;
@@ -70,6 +71,7 @@ public class AcceptanceService {
         List<AcceptanceItem> savedItems = new ArrayList<>();
         // 待执行的后续动作（入库/退货），需在验收单与明细落库后执行
         List<Runnable> postActions = new ArrayList<>();
+        java.util.Set<Long> submittedDiIds = new java.util.HashSet<>();
 
         for (AcceptanceItemInput in : items) {
             DeliveryItem di = deliveryItemRepo.findById(in.deliveryItemId())
@@ -77,10 +79,28 @@ public class AcceptanceService {
             if (!di.getBatch().getId().equals(batch.getId())) {
                 throw BusinessException.badRequest("送货明细不属于该批次: " + in.deliveryItemId());
             }
+            if (!submittedDiIds.add(di.getId())) {
+                throw BusinessException.badRequest("送货明细重复验收: " + in.deliveryItemId());
+            }
             Ingredient ingredient = di.getIngredient();
             OrderItem oi = di.getOrderItem();
             BigDecimal price = oi != null ? oi.getContractPrice() : ingredient.getReferencePrice();
             BigDecimal orderedQty = oi != null ? oi.getQuantity() : BigDecimal.ZERO;
+
+            // 已登记冷链温度超标处置单的明细：以处置/质检结论落账，
+            // 入库（含限制用途）、退货、索赔均已由冷链处置流程完成，这里不重复执行
+            var coldCaseOpt = coldChainCaseRepo.findByDeliveryItemId(di.getId());
+            if (coldCaseOpt.isPresent()) {
+                AcceptanceItem coldItem = buildColdChainItem(coldCaseOpt.get(), record, di, ingredient, orderedQty);
+                savedItems.add(coldItem);
+                if (coldItem.getResult() != AcceptanceItemResult.QUALIFIED) {
+                    anyNotQualified = true;
+                }
+                if (coldItem.getAcceptedQty().signum() > 0) {
+                    anyAccepted = true;
+                }
+                continue;
+            }
 
             BigDecimal accepted = nvl(in.acceptedQty());
             BigDecimal rejected = nvl(in.rejectedQty());
@@ -194,6 +214,14 @@ public class AcceptanceService {
         record.setOverallResult(!anyNotQualified ? AcceptanceOverallResult.QUALIFIED
                 : anyAccepted ? AcceptanceOverallResult.PARTIAL_QUALIFIED
                 : AcceptanceOverallResult.REJECTED);
+
+        // 批次内全部送货明细都必须验收（含已走冷链超标处置流程的明细）
+        List<Long> batchDiIds = deliveryItemRepo.findByBatchId(batchId).stream()
+                .map(DeliveryItem::getId).toList();
+        if (!submittedDiIds.containsAll(batchDiIds)) {
+            throw BusinessException.badRequest("存在未验收的送货明细，请补全后再提交");
+        }
+
         recordRepo.save(record);
         savedItems.forEach(itemRepo::save);
         postActions.forEach(Runnable::run);
@@ -249,6 +277,61 @@ public class AcceptanceService {
 
     private static BigDecimal nvl(BigDecimal v) {
         return v == null ? BigDecimal.ZERO : v;
+    }
+
+    /**
+     * 冷链温度超标处置明细按处置结论落账：
+     * 拒收 -> 拒收退货；降级复查合格 -> 降级（已入限制用途库存）；复检合格 -> 合格。
+     * 尚未完成质检复查/复检的处置单不允许验收。
+     */
+    private AcceptanceItem buildColdChainItem(ColdChainCase cc, AcceptanceRecord record,
+                                              DeliveryItem di, Ingredient ingredient, BigDecimal orderedQty) {
+        AcceptanceItem item = new AcceptanceItem();
+        item.setRecord(record);
+        item.setDeliveryItem(di);
+        item.setIngredient(ingredient);
+        item.setOrderedQty(orderedQty);
+        item.setDeliveredQty(di.getDeliveredQty());
+        BigDecimal qty = di.getDeliveredQty();
+
+        switch (cc.getDisposition()) {
+            case REJECTION -> {
+                item.setAcceptedQty(BigDecimal.ZERO);
+                item.setRejectedQty(qty);
+                item.setDowngradedQty(BigDecimal.ZERO);
+                item.setResult(AcceptanceItemResult.REJECTED);
+                item.setDowngradeStatus(DowngradeStatus.NONE);
+                item.setRejectReason("冷链温度超标拒收（处置单 " + cc.getCaseNo()
+                        + "，实测 " + cc.getArrivalTemperature() + "℃）");
+            }
+            case DOWNGRADE -> {
+                if (cc.getReviewStatus() != com.campus.food.domain.enums.ColdChainReviewStatus.PASSED) {
+                    throw BusinessException.conflict("冷链降级处置单 " + cc.getCaseNo()
+                            + " 尚未完成质检复查，不能验收");
+                }
+                item.setAcceptedQty(BigDecimal.ZERO);
+                item.setRejectedQty(BigDecimal.ZERO);
+                item.setDowngradedQty(qty);
+                item.setResult(AcceptanceItemResult.DOWNGRADED);
+                item.setDowngradeStatus(DowngradeStatus.APPROVED);
+                item.setDiscountRate(cc.getDiscountRate());
+                item.setRejectReason("冷链超标降级为非学生餐使用（处置单 " + cc.getCaseNo() + "）");
+            }
+            case RECHECK -> {
+                if (cc.getReviewStatus() != com.campus.food.domain.enums.ColdChainReviewStatus.PASSED) {
+                    throw BusinessException.conflict("冷链处置单 " + cc.getCaseNo()
+                            + " 尚在等待复检结果，不能验收");
+                }
+                item.setAcceptedQty(qty);
+                item.setRejectedQty(BigDecimal.ZERO);
+                item.setDowngradedQty(BigDecimal.ZERO);
+                item.setResult(AcceptanceItemResult.QUALIFIED);
+                item.setDowngradeStatus(DowngradeStatus.NONE);
+            }
+            default -> throw BusinessException.conflict("冷链处置单 " + cc.getCaseNo()
+                    + " 食堂尚未做出处置决策，不能验收");
+        }
+        return item;
     }
 
     public record RecordDetail(AcceptanceRecord record, List<AcceptanceItem> items) {

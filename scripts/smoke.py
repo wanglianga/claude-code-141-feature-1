@@ -13,6 +13,7 @@ USERS = {
     "inspector": ("inspector", "inspector123"),
     "buyer": ("buyer", "buyer123"),
     "canteen": ("canteen", "canteen123"),
+    "quality": ("quality", "quality123"),
     "admin": ("admin", "admin123"),
 }
 
@@ -61,7 +62,7 @@ def main():
     today = date.today()
     print("== 1. 基础数据与权限 ==")
     ings = call("canteen", "GET", "/api/ingredients")
-    check("食材列表 12 条", ings and len(ings) == 12)
+    check("食材列表 13 条", ings and len(ings) == 13, f"got {len(ings) if ings else 0}")
     ing = {i["code"]: i for i in ings}
     r = call("inspector", "POST", "/api/suppliers", {"code": "X", "name": "X"}, expect=403)
     check("验收员不能新建供应商(403)", r is not None)
@@ -77,7 +78,7 @@ def main():
     check("计划已生成", plan and plan["status"] == "DRAFT")
     pd = call("canteen", "GET", f"/api/plans/{plan['id']}")
     items = pd["items"]
-    check("计划明细 8 行（大米库存充足不采购）", len(items) == 8, f"got {len(items)}")
+    check("计划明细 9 行（大米库存充足不采购，新增酸奶）", len(items) == 9, f"got {len(items)}")
     cabbage_item = find(items, ingredient={"id": ing["ING007"]["id"], "code": "ING007", "name": "大白菜",
                                            "category": "VEGETABLE", "unit": "kg", "spec": "散装",
                                            "requiresColdChain": False, "shelfLifeDays": 5,
@@ -269,6 +270,177 @@ def main():
     check("归因分布含 供应商履约/天气",
           cb["byCause"].get("SUPPLIER_PERFORMANCE", 0) >= 1 and cb["byCause"].get("WEATHER", 0) >= 1,
           str(cb["byCause"]))
+
+    print("== 12. 冷链温度超标验收（拒收/降级/复检） ==")
+    dairy_order = find(orders, supplier=sup["SUP003"])
+    check("找到乳业供应商订货单", dairy_order is not None)
+    dod = call("buyer", "GET", f"/api/orders/{dairy_order['id']}")
+    yogurt_oi = find(dod["items"], ingredient=ing["ING013"])
+    milk_oi = find(dod["items"], ingredient=ing["ING010"])
+    check("订货明细含酸奶/鲜牛奶", yogurt_oi is not None and milk_oi is not None)
+    meals = call("canteen", "GET", f"/api/menus/{menu['id']}")["meals"]
+    breakfast = [m for m in meals if m["meal"]["dishName"] == "牛奶鸡蛋早餐"][0]["meal"]
+    bfast_date = breakfast["date"]
+
+    def register_cold_batch(qty, oi, ingredient, temp, day_offset):
+        arrive = (datetime.combine(date.fromisoformat(bfast_date) + timedelta(days=day_offset),
+                                   datetime.min.time()).replace(hour=7)).isoformat()
+        b = call("buyer", "POST", "/api/deliveries", {
+            "orderId": dairy_order["id"], "licensePlate": "沪C55128", "driverName": "司机乙",
+            "arrivedAt": arrive, "vehicleTemperature": temp,
+            "items": [{"orderItemId": oi, "ingredientId": ingredient, "deliveredQty": qty,
+                       "productionBatchNo": f"SU{temp}", "productionDate": str(today),
+                       "expiryDate": str(today + timedelta(days=7))}]})
+        bd3 = call("buyer", "GET", f"/api/deliveries/{b['id']}")
+        return b, bd3["items"][0]
+
+    # --- A. 酸奶到货 9℃（合同 2~6℃），拒收 ---
+    ba, yogurt_di = register_cold_batch(100, yogurt_oi["id"], ing["ING013"]["id"], 9, 0)
+    case_a = call("inspector", "POST", "/api/cold-chain/cases", {
+        "batchId": ba["id"], "deliveryItemId": yogurt_di["id"], "arrivalTemperature": 9,
+        "transportMinutes": 180, "productBatchNo": "SUANNAI-20261007-A",
+        "notes": "车厢温度偏高，酸奶杯壁有水珠",
+        "photos": [{"photoUrl": "https://example.com/photos/yogurt-temp.jpg", "caption": "车厢温度计9℃"},
+                   {"photoUrl": "https://example.com/photos/yogurt-batch.jpg", "caption": "产品批次标签"}]})
+    check("冷链处置单已登记(待处置)", case_a and case_a["disposition"] == "PENDING"
+          and case_a["reviewStatus"] == "PENDING_REVIEW", str(case_a))
+    cd = call("inspector", "GET", f"/api/cold-chain/cases/{case_a['id']}")
+    check("登记 2 张抽检照片", len(cd["photos"]) == 2, str(cd["photos"]))
+    anomalies = call("buyer", "GET", f"/api/anomalies?supplierId={sup['SUP003']['id']}")
+    check("乳业批次自动识别冷链超标异常", any(a["type"] == "COLD_CHAIN_BREACH" for a in anomalies))
+    # 权限：验收员不能决策
+    call("inspector", "POST", f"/api/cold-chain/cases/{case_a['id']}/decision",
+         {"disposition": "REJECTION"}, expect=403)
+    # 输入校验：未超温/无照片
+    call("inspector", "POST", "/api/cold-chain/cases", {
+        "batchId": ba["id"], "deliveryItemId": yogurt_di["id"], "arrivalTemperature": 4,
+        "transportMinutes": 10, "photos": [{"photoUrl": "x"}]}, expect=409)
+    dec = call("canteen", "POST", f"/api/cold-chain/cases/{case_a['id']}/decision",
+               {"disposition": "REJECTION", "note": "温度超标影响学生饮用安全，拒收"})
+    check("食堂拒收：退货单已生成", dec and dec["returnOrder"] is not None)
+    check("拒收自动索赔 30 元（100杯×3×10%）且已批准、直连结算",
+          dec["claim"] and float(dec["claim"]["amount"]) == 30.0 and dec["claim"]["status"] == "APPROVED",
+          str(dec["claim"]))
+    cd = call("canteen", "GET", f"/api/cold-chain/cases/{case_a['id']}")
+    check("拒收影响当天早餐 -> 替代采购记录",
+          len(cd["substitutePurchases"]) >= 1 and float(cd["substitutePurchases"][0]["requiredQty"]) == 100.0,
+          str(cd["substitutePurchases"]))
+    check("同步生成菜单调整记录(SUBSTITUTE)",
+          len(cd["menuAdjustments"]) >= 1 and cd["menuAdjustments"][0]["action"] == "SUBSTITUTE",
+          str(cd["menuAdjustments"]))
+    sp_id = cd["substitutePurchases"][0]["id"]
+    call("buyer", "POST", f"/api/cold-chain/substitutes/{sp_id}/receive")
+    sp = call("buyer", "GET", f"/api/cold-chain/cases/{case_a['id']}/substitutes")
+    check("替代采购已登记到货", sp[0]["status"] == "RECEIVED")
+    rec_a = call("inspector", "POST", "/api/acceptances", {
+        "batchId": ba["id"], "measuredTemp": 9, "temperatureOk": False, "appearanceOk": True,
+        "samplingResult": "中心温度超标", "notes": "冷链处置拒收",
+        "items": [{"deliveryItemId": yogurt_di["id"], "rejectedQty": 100,
+                   "rejectReason": "冷链温度超标拒收"}]})
+    check("拒收批次完成验收", rec_a is not None)
+    rd_a = call("inspector", "GET", f"/api/acceptances/{rec_a['id']}")
+    ai_a = rd_a["items"][0]
+    check("验收明细 REJECTED 且退货不重复生成",
+          ai_a["result"] == "REJECTED" and float(ai_a["rejectedQty"]) == 100.0)
+    dairy_returns = call("buyer", "GET", f"/api/returns?supplierId={sup['SUP003']['id']}")
+    check("酸奶退货单仅 1 张（不重复）", len(dairy_returns) == 1 and float(dairy_returns[0]["quantity"]) == 100.0,
+          str(dairy_returns))
+
+    # --- B. 鲜牛奶到货 8℃，降级为非即食加工，待质检复查 ---
+    bb, milk_di = register_cold_batch(50, milk_oi["id"], ing["ING010"]["id"], 8, 1)
+    case_b = call("inspector", "POST", "/api/cold-chain/cases", {
+        "batchId": bb["id"], "deliveryItemId": milk_di["id"], "arrivalTemperature": 8,
+        "transportMinutes": 240, "productBatchNo": "NIUNAI-20261008-B",
+        "photos": [{"photoUrl": "https://example.com/photos/milk-temp.jpg", "caption": "测温8℃"}]})
+    check("第二张冷链处置单已登记", case_b is not None)
+    call("canteen", "POST", f"/api/cold-chain/cases/{case_b['id']}/decision",
+         {"disposition": "DOWNGRADE", "note": "降级非学生餐但未指定用途"}, expect=400)
+    check("降级但缺用途被拒后尚未入库", case_b["disposition"] == "PENDING")
+    # 食堂必须指定用途
+    dec_b = call("canteen", "POST", f"/api/cold-chain/cases/{case_b['id']}/decision",
+                 {"disposition": "DOWNGRADE", "usageScope": "COOKED_ONLY",
+                  "note": "降级为非即食加工，仅限充分加热后供教职工餐"})
+    check("降级处置：等待质检复查、未入库",
+          dec_b["usageScope"] == "COOKED_ONLY" and dec_b["reviewStatus"] == "PENDING_REVIEW"
+          and dec_b.get("restrictedStock") is None, str(dec_b))
+    call("inspector", "POST", "/api/acceptances", {
+        "batchId": bb["id"], "measuredTemp": 8, "temperatureOk": False, "appearanceOk": True,
+        "items": [{"deliveryItemId": milk_di["id"], "downgradedQty": 50}]}, expect=409)
+    # 食堂不能自行质检
+    call("canteen", "POST", f"/api/cold-chain/cases/{case_b['id']}/qc-review",
+         {"pass": True}, expect=403)
+    rv = call("quality", "POST", f"/api/cold-chain/cases/{case_b['id']}/qc-review",
+              {"pass": True, "discountRate": 0.3, "note": "感官与菌落快检合格，允许非即食加工"})
+    check("质检复查合格后入限制用途库存 50",
+          rv and rv["reviewStatus"] == "PASSED" and rv["restrictedStock"] is not None
+          and float(rv["restrictedStock"]["quantity"]) == 50.0, str(rv))
+    rstock = call("canteen", "GET",
+                  f"/api/inventory/restricted-levels?ingredientId={ing['ING010']['id']}")
+    check("限制用途库存可查(COOKED_ONLY 50)",
+          len(rstock) >= 1 and rstock[0]["usageScope"] == "COOKED_ONLY"
+          and float(rstock[0]["quantity"]) == 50.0, str(rstock))
+    levels = call("canteen", "GET", "/api/inventory/levels")
+    milk_lv = find(levels, ingredient=ing["ING010"])
+    check("降级批次不进入学生餐正常库存（鲜牛奶仍 60）", float(milk_lv["quantity"]) == 60.0,
+          str(milk_lv["quantity"]))
+    rec_b = call("inspector", "POST", "/api/acceptances", {
+        "batchId": bb["id"], "measuredTemp": 8, "temperatureOk": False, "appearanceOk": True,
+        "items": [{"deliveryItemId": milk_di["id"], "downgradedQty": 50}]})
+    rd_b = call("inspector", "GET", f"/api/acceptances/{rec_b['id']}")
+    check("降级批次验收 DOWNGRADED/APPROVED（按冷链处置结论落账）",
+          rd_b["items"][0]["result"] == "DOWNGRADED"
+          and rd_b["items"][0]["downgradeStatus"] == "APPROVED"
+          and float(rd_b["items"][0]["discountRate"]) == 0.3)
+    txns = call("canteen", "GET", f"/api/inventory/txns?ingredientId={ing['ING010']['id']}")
+    check("库存流水含 RESTRICTED_IN", any(t["type"] == "RESTRICTED_IN" for t in txns), str([t["type"] for t in txns]))
+    call("canteen", "POST", f"/api/cold-chain/cases/{case_b['id']}/restricted-consume",
+         {"qty": 10, "purpose": "教职工餐烘焙用奶，充分加热"})
+    call("canteen", "POST", f"/api/cold-chain/cases/{case_b['id']}/restricted-consume",
+         {"qty": 100, "purpose": "超量领用"}, expect=400)
+    rstock = call("canteen", "GET", f"/api/inventory/restricted-levels?ingredientId={ing['ING010']['id']}")
+    check("限制用途领用 10，余额 40，超量被拒",
+          float(rstock[0]["consumedQty"]) == 10.0
+          and float(rstock[0]["quantity"]) - float(rstock[0]["consumedQty"]) == 40.0, str(rstock))
+
+    # --- C. 鲜牛奶到货 7℃，等待复检，复检合格正常入库 ---
+    bc, milk_di2 = register_cold_batch(50, milk_oi["id"], ing["ING010"]["id"], 7, 2)
+    case_c = call("inspector", "POST", "/api/cold-chain/cases", {
+        "batchId": bc["id"], "deliveryItemId": milk_di2["id"], "arrivalTemperature": 7,
+        "transportMinutes": 200, "productBatchNo": "NIUNAI-20261009-C",
+        "photos": [{"photoUrl": "https://example.com/photos/milk-temp2.jpg"}]})
+    dec_c = call("canteen", "POST", f"/api/cold-chain/cases/{case_c['id']}/decision",
+                 {"disposition": "RECHECK", "note": "取样送检，暂缓处置"})
+    check("等待复检状态 PENDING_LAB", dec_c["reviewStatus"] == "PENDING_LAB")
+    call("inspector", "POST", "/api/acceptances", {
+        "batchId": bc["id"], "measuredTemp": 7, "temperatureOk": False, "appearanceOk": True,
+        "items": [{"deliveryItemId": milk_di2["id"], "acceptedQty": 50}]}, expect=409)
+    rv_c = call("quality", "POST", f"/api/cold-chain/cases/{case_c['id']}/lab-result",
+                {"pass": True, "labReportNo": "LAB2026100901", "note": "微生物指标合格"})
+    check("复检合格放行", rv_c["reviewStatus"] == "PASSED" and rv_c["labReportNo"] == "LAB2026100901")
+    rec_c = call("inspector", "POST", "/api/acceptances", {
+        "batchId": bc["id"], "measuredTemp": 7, "temperatureOk": False, "appearanceOk": True,
+        "items": [{"deliveryItemId": milk_di2["id"], "acceptedQty": 50}]})
+    rd_c = call("inspector", "GET", f"/api/acceptances/{rec_c['id']}")
+    check("复检合格批次验收入库 QUALIFIED",
+          rd_c["items"][0]["result"] == "QUALIFIED" and float(rd_c["items"][0]["acceptedQty"]) == 50.0)
+    levels = call("canteen", "GET", "/api/inventory/levels")
+    milk_lv = find(levels, ingredient=ing["ING010"])
+    check("鲜牛奶正常库存 60 + 复检合格 50 = 110（降级批次不计入）",
+          float(milk_lv["quantity"]) == 110.0, str(milk_lv["quantity"]))
+
+    # --- D. 冷链索赔与降级折让进入供应商结算 ---
+    st3 = call("buyer", "POST", "/api/settlements/generate", {
+        "supplierId": sup["SUP003"]["id"],
+        "periodStart": str(today - timedelta(days=7)),
+        "periodEnd": str(today + timedelta(days=14))})
+    check("乳业结算单已生成", st3 is not None)
+    check("乳业验收应付 400（降级50×4 + 复检50×4）",
+          float(st3["deliveredAmount"]) == 400.0, str(st3["deliveredAmount"]))
+    check("酸奶拒收退货扣减 300", float(st3["returnDeduction"]) == 300.0, str(st3["returnDeduction"]))
+    check("冷链降级折价扣减 60（200×30%）", float(st3["downgradeDeduction"]) == 60.0,
+          str(st3["downgradeDeduction"]))
+    check("冷链拒收索赔扣减 30（直连结算）", float(st3["claimDeduction"]) == 30.0, str(st3["claimDeduction"]))
+    check("冷链合同扣罚已计入(>=300)", float(st3["penaltyDeduction"]) >= 300.0, str(st3["penaltyDeduction"]))
 
     print("== 11. 未认证与 Swagger ==")
     import urllib.request as u

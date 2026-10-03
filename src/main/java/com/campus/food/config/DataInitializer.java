@@ -46,6 +46,7 @@ public class DataInitializer implements CommandLineRunner {
         user("inspector", "inspector123", "王验收", Role.INSPECTOR);
         user("buyer", "buyer123", "李采购", Role.PROCUREMENT);
         user("canteen", "canteen123", "赵食堂", Role.CANTEEN);
+        user("quality", "quality123", "周质检", Role.QUALITY);
         user("admin", "admin123", "陈校长", Role.SCHOOL_ADMIN);
 
         // 供应商
@@ -79,6 +80,8 @@ public class DataInitializer implements CommandLineRunner {
                 false, null, null, 15, "50", "8.00", null);
         Ingredient milk = ingredient("ING010", "鲜牛奶", IngredientCategory.DAIRY, "L", "250ml/盒",
                 true, "0", "6", 7, "100", "4.00", null);
+        ingredient("ING013", "酸奶", IngredientCategory.DAIRY, "杯", "150g/杯",
+                true, "2", "6", 14, "0", "3.00", null);
         ingredient("ING011", "食盐", IngredientCategory.CONDIMENT, "kg", "500g/袋",
                 false, null, null, 720, "20", "2.00", null);
         ingredient("ING012", "酱油", IngredientCategory.CONDIMENT, "L", "1.9L/桶",
@@ -117,6 +120,7 @@ public class DataInitializer implements CommandLineRunner {
         MenuMeal m3 = meal(menu, monday.plusDays(2), MealType.BREAKFAST, "牛奶鸡蛋早餐", 500);
         mmi(m3, milk, "120");
         mmi(m3, egg, "30");
+        ingredientRepo.findByCode("ING013").ifPresent(yogurt -> mmi(m3, yogurt, "100"));
 
         MenuMeal m4 = meal(menu, monday.plusDays(2), MealType.LUNCH, "菠菜炒蛋", 460);
         mmi(m4, spinach, "25");

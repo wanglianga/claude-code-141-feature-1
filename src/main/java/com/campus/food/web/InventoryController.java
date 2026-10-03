@@ -39,6 +39,12 @@ public class InventoryController {
         return inventoryService.safetyAlerts();
     }
 
+    @Operation(summary = "限制用途库存（冷链降级批次，仅限教职工餐/非即食加工，不计入学生餐可用库存）")
+    @GetMapping("/restricted-levels")
+    public List<com.campus.food.domain.RestrictedStock> restrictedLevels(@RequestParam(required = false) Long ingredientId) {
+        return inventoryService.restrictedLevels(ingredientId);
+    }
+
     @Operation(summary = "库存流水")
     @GetMapping("/txns")
     public List<InventoryTxn> txns(@RequestParam Long ingredientId) {
